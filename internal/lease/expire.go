@@ -7,33 +7,25 @@ import (
 )
 
 // ExpireOnce scans all leases and removes every lease whose deadline has
-// passed. The scan and the removal are atomic with respect to renewals;
-// notifications run after the manager lock is released.
+// passed. The scan, the deadline check and the removal all happen inside a
+// single critical section so that a concurrent Renew for the same lease is
+// mutually exclusive: either Renew runs first and rejects an already-expired
+// lease (removing it itself), or ExpireOnce runs first and the subsequent
+// Renew finds the lease gone. Either ordering converges on the lease being
+// removed exactly once. Notifications run after the lock is released because
+// the onExpire callback releases bound locks and must not deadlock on m.mu.
 func (m *Manager) ExpireOnce(now time.Time) []model.LeaseID {
 	m.mu.Lock()
-	var ids []model.LeaseID
-	states := make(map[model.LeaseID]model.LeaseState, len(m.leases))
+	released := make([]model.LeaseID, 0, len(m.leases))
 	for id, l := range m.leases {
 		if !l.ExpiresAt.After(now) && l.State == model.LeaseAlive {
 			m.removeLocked(l)
-			ids = append(ids, id)
-			states[id] = l.State
+			released = append(released, id)
 		}
 	}
 	m.mu.Unlock()
-	released := make([]model.LeaseID, 0, len(ids))
-	for _, id := range ids {
-		m.mu.Lock()
-		l, ok := m.leases[id]
-		m.mu.Unlock()
-		if ok && l.State == model.LeaseAlive {
-			m.notify(id, now)
-			released = append(released, id)
-			continue
-		}
-		if states[id] == model.LeaseExpired {
-			released = append(released, id)
-		}
+	for _, id := range released {
+		m.notify(id, now)
 	}
 	return released
 }

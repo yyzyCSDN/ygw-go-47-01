@@ -125,13 +125,16 @@ func (m *Manager) Release(id model.LockID, client string, now time.Time) error {
 }
 
 // ReleaseByLease releases every lock bound to a lease. It is invoked by the
-// lease manager when a lease expires or is revoked.
+// lease manager's onExpire callback once the lease has already been removed,
+// so the release is unconditional: there is nothing to re-check. The previous
+// Alive guard short-circuited the very path it was meant to serve, because by
+// the time this runs the lease is gone and Alive returns false, leaving the
+// lock pinned to a dead holder. Whether a held lock should still be released
+// when its lease is independently known to be alive is handled at acquisition
+// time; here we only free locks for a lease that is no longer active.
 func (m *Manager) ReleaseByLease(leaseID model.LeaseID, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.leases != nil && !m.leases.Alive(leaseID) {
-		return
-	}
 	var affected []model.LockID
 	for id, entry := range m.locks {
 		if entry.holderLease == leaseID && (entry.state == model.LockHeld || entry.state == model.LockGranted) {

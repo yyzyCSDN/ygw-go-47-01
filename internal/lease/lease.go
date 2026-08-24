@@ -83,12 +83,19 @@ func (m *Manager) Lookup(id model.LeaseID) (model.Lease, bool) {
 	return copyLease, true
 }
 
-// Alive reports whether a lease is currently registered and not expired.
+// Alive reports whether a lease is registered and still inside its deadline.
+// The deadline is checked against the clock rather than relying on the State
+// flag, which is only flipped by an explicit renew/revoke/expire call. Between
+// expiry sweeps a lease whose deadline has passed still has State == LeaseAlive,
+// so callers (lock release, waiter wake-up) must not trust the flag alone.
 func (m *Manager) Alive(id model.LeaseID) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l, ok := m.leases[id]
-	return ok && l.State == model.LeaseAlive
+	if !ok || l.State != model.LeaseAlive {
+		return false
+	}
+	return l.ExpiresAt.After(m.clock.Now())
 }
 
 // Renew extends a lease. Renewals submitted at or after the deadline are
