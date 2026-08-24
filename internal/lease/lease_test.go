@@ -1,0 +1,75 @@
+package lease_test
+
+import (
+	"testing"
+	"time"
+
+	"coordination/internal/lease"
+	"coordination/internal/model"
+)
+
+func mustClock(t *testing.T) *lease.ManualClock {
+	t.Helper()
+	return lease.NewManualClock(time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC))
+}
+
+func TestLeaseCreateRenewExpire(t *testing.T) {
+	clock := mustClock(t)
+	mgr := lease.New(clock, nil)
+	if err := mgr.Create("l1", 100*time.Millisecond, "client-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.Alive("l1") {
+		t.Fatal("lease should be alive")
+	}
+	clock.Advance(50 * time.Millisecond)
+	if err := mgr.Renew("l1", clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(100 * time.Millisecond)
+	if err := mgr.Renew("l1", clock.Now()); err != lease.ErrLeaseExpired {
+		t.Fatalf("renew after deadline err = %v, want ErrLeaseExpired", err)
+	}
+	if mgr.Alive("l1") {
+		t.Fatal("lease should be expired")
+	}
+}
+
+func TestLeaseBatchRenewAllAlive(t *testing.T) {
+	clock := mustClock(t)
+	mgr := lease.New(clock, nil)
+	for _, id := range []model.LeaseID{"a", "b", "c"} {
+		if err := mgr.Create(id, time.Second, "client"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock.Advance(500 * time.Millisecond)
+	results := mgr.BatchRenew([]model.LeaseID{"a", "b", "c"}, clock.Now())
+	for id, err := range results {
+		if err != nil {
+			t.Fatalf("renew %s: %v", id, err)
+		}
+	}
+	if mgr.Count() != 3 {
+		t.Fatalf("count = %d, want 3", mgr.Count())
+	}
+}
+
+func TestLeaseExpireOnceRemovesOverdue(t *testing.T) {
+	clock := mustClock(t)
+	mgr := lease.New(clock, nil)
+	if err := mgr.Create("l1", 200*time.Millisecond, "h"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Create("l2", time.Minute, "h"); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(300 * time.Millisecond)
+	expired := mgr.ExpireOnce(clock.Now())
+	if len(expired) != 1 || expired[0] != "l1" {
+		t.Fatalf("expired = %v, want [l1]", expired)
+	}
+	if !mgr.Alive("l2") {
+		t.Fatal("l2 should survive")
+	}
+}
