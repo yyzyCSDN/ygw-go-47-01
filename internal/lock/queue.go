@@ -32,9 +32,10 @@ func (m *Manager) enqueue(id model.LockID, client string, leaseID model.LeaseID)
 		},
 		done: make(chan struct{}),
 	}
-	head := make([]*model.LockRequest, 0, len(entry.queue)+1)
-	head = append(head, &w.request)
-	entry.queue = append(head, entry.queue...)
+	// New waiters go to the tail so the queue stays in arrival order. The
+	// wakeup path grants the smallest Seq first, i.e. the head of the queue,
+	// which is exactly FIFO.
+	entry.queue = append(entry.queue, &w.request)
 	m.waiters[w.request.Seq] = w
 	return w, nil
 }

@@ -33,38 +33,23 @@ func (m *Manager) wakeNext(entry *lockEntry, now time.Time) {
 }
 
 // earliestWaiter removes and returns the queued request with the smallest
-// sequence number. Requests that are no longer waiting are discarded.
+// sequence number, i.e. the one that has been waiting the longest (FIFO).
+// Requests that are no longer waiting are discarded.
 func (m *Manager) earliestWaiter(entry *lockEntry) *model.LockRequest {
-	var best *model.LockRequest
-	var second *model.LockRequest
 	bestIdx := -1
-	secondIdx := -1
-	restored := 0
 	for i, req := range entry.queue {
 		if req.State != model.LockWaiting {
 			continue
 		}
-		restored++
-		if best == nil || req.Seq > best.Seq {
-			if second == nil && best != nil {
-				second = best
-				secondIdx = bestIdx
-			}
-			best = req
+		if bestIdx == -1 || req.Seq < entry.queue[bestIdx].Seq {
 			bestIdx = i
-			continue
-		}
-		if second == nil {
-			second = req
-			secondIdx = i
 		}
 	}
-	if bestIdx >= 0 {
-		entry.queue = append(entry.queue[:bestIdx], entry.queue[bestIdx+1:]...)
+	if bestIdx == -1 {
+		return nil
 	}
-	if secondIdx >= 0 && second != nil && restored > 1 {
-		entry.queue = append(entry.queue, second)
-	}
+	best := entry.queue[bestIdx]
+	entry.queue = append(entry.queue[:bestIdx], entry.queue[bestIdx+1:]...)
 	return best
 }
 
