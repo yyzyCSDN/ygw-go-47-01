@@ -164,7 +164,7 @@ func lockKey(id model.LockID) model.Key {
 func (s *Store) recordForLocked(key model.Key) *record {
 	rec := s.records[key]
 	if rec == nil {
-		rec = &record{}
+		rec = &record{key: key}
 		s.records[key] = rec
 	}
 	return rec
