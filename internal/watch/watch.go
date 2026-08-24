@@ -82,15 +82,12 @@ func (w *Watcher) Watch(ctx context.Context, key model.Key, startRev model.Revis
 	}
 	sub.snapshot = snapshotEntries(sub.stream.Snapshot)
 	w.subs[id] = sub
-	sub.mu.Lock()
-	headAtWatch := w.store.CurrentRev()
-	caughtUp := sub.cursor >= headAtWatch
-	if !caughtUp {
-		sub.cursor = headAtWatch
-	}
-	sub.mu.Unlock()
 	w.mu.Unlock()
 
+	// sub.cursor stays at startRev: the deliver loop uses it to skip events
+	// the caller already acknowledged and to replay the (startRev, head] gap.
+	// Advancing it to head here would drop exactly the disconnected changes a
+	// reconnect is supposed to recover.
 	go w.deliverLoop(ctx, sub, sub.stream, sub.snapshot, sub.gen)
 	return id, sub.ch, nil
 }

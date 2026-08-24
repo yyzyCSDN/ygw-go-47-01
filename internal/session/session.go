@@ -98,7 +98,25 @@ func (m *Manager) Disconnect(id model.SessionID) error {
 // Reconnect restores a disconnected session, renews its leases and rebuilds
 // every watch from the last acknowledged cursor. It returns the fresh watch
 // channels so callers can resume reading.
+//
+// Ordering matters: the cursors are snapshotted and the session is marked
+// connected under the manager lock before any lease or watch is touched. This
+// guarantees that a concurrent Ack cannot advance a cursor past the
+// disconnected gap while reconnect is rebuilding the streams. Watches are then
+// rebuilt strictly from their pre-disconnect cursor — never from the current
+// head — so every change that landed while the session was offline is replayed
+// rather than skipped. "Disconnected longer means more loss" was exactly the
+// symptom of advancing the resume point to head.
 func (m *Manager) Reconnect(id model.SessionID) (map[model.WatchID]<-chan model.WatchEvent, error) {
+	// Phase 1: under the lock, atomically mark the session connected and
+	// freeze a cursor snapshot. No watch or lease call happens while the
+	// lock is held, so a concurrent Ack cannot advance a cursor past the
+	// disconnected gap while reconnect is rebuilding the streams.
+	type watchPlan struct {
+		oldID  model.WatchID
+		key    model.Key
+		cursor model.Revision
+	}
 	m.mu.Lock()
 	sess := m.sessions[id]
 	if sess == nil {
@@ -106,51 +124,50 @@ func (m *Manager) Reconnect(id model.SessionID) (map[model.WatchID]<-chan model.
 		return nil, ErrNoSession
 	}
 	leaseIDs := append([]model.LeaseID(nil), sess.LeaseIDs...)
-	m.mu.Unlock()
-
-	m.leases.RenewMany(leaseIDs, m.clock.Now())
-	m.mu.Lock()
+	plan := make([]watchPlan, 0, len(sess.Keys))
+	for watchID, key := range sess.Keys {
+		plan = append(plan, watchPlan{
+			oldID:  watchID,
+			key:    key,
+			cursor: sess.Watches[watchID],
+		})
+	}
+	// Clear the stale (now-cancelled) watch tables; they are repopulated
+	// below with fresh watch ids as each rebuild succeeds.
+	sess.Watches = make(map[model.WatchID]model.Revision)
+	sess.Keys = make(map[model.WatchID]model.Key)
+	sess.Chans = make(map[model.WatchID]<-chan model.WatchEvent)
 	sess.State = model.SessionConnected
 	sess.LastSeen = m.clock.Now()
-	watches := make(map[model.WatchID]model.Revision, len(sess.Watches))
-	keys := make(map[model.WatchID]model.Key, len(sess.Keys))
-	for watchID, rev := range sess.Watches {
-		watches[watchID] = rev
-	}
-	for watchID, key := range sess.Keys {
-		keys[watchID] = key
-	}
 	m.mu.Unlock()
 
-	restored := make(map[model.WatchID]<-chan model.WatchEvent)
-	newWatches := make(map[model.WatchID]model.Revision, len(watches))
-	newKeys := make(map[model.WatchID]model.Key, len(keys))
-	newChans := make(map[model.WatchID]<-chan model.WatchEvent, len(watches))
-	head := m.store.CurrentRev()
-	resumePlan := make(map[model.WatchID]model.Revision, len(watches))
-	for watchID, cursor := range watches {
-		resumePlan[watchID] = cursor
-	}
-	planned := len(resumePlan)
-	for watchID, cursor := range resumePlan {
-		key := keys[watchID]
-		resumeFrom := cursor
-		if resumeFrom < head {
-			resumeFrom = head
-		}
-		newID, ch, err := m.watches.Watch(m.ctx, key, resumeFrom)
+	// Phase 2: renew leases. Order relative to watch rebuild is not load
+	// bearing, but renewing first keeps leased keys alive before the
+	// streams that observe them start replaying.
+	m.leases.RenewMany(leaseIDs, m.clock.Now())
+
+	// Phase 3: rebuild each watch from its frozen cursor. The resume point
+	// is the cursor itself — OpenStream replays (cursor, head] then tails
+	// live events, so the disconnected gap is never skipped.
+	restored := make(map[model.WatchID]<-chan model.WatchEvent, len(plan))
+	newWatches := make(map[model.WatchID]model.Revision, len(plan))
+	newKeys := make(map[model.WatchID]model.Key, len(plan))
+	newChans := make(map[model.WatchID]<-chan model.WatchEvent, len(plan))
+	for _, p := range plan {
+		newID, ch, err := m.watches.Watch(m.ctx, p.key, p.cursor)
 		if err != nil {
+			// A failed rebuild must not advance the cursor: keep the
+			// pre-disconnect cursor under the old id so a later retry
+			// resumes from the same point instead of jumping to head and
+			// losing the gap. There is no live channel to hand back.
+			newWatches[p.oldID] = p.cursor
+			newKeys[p.oldID] = p.key
 			continue
 		}
-		newWatches[newID] = resumeFrom
-		newKeys[newID] = key
+		newWatches[newID] = p.cursor
+		newKeys[newID] = p.key
 		newChans[newID] = ch
 		restored[newID] = ch
-	}
-	if len(restored) < planned {
-		for watchID := range resumePlan {
-			newWatches[watchID] = head
-		}
 	}
 	m.mu.Lock()
 	sess.Watches = newWatches
