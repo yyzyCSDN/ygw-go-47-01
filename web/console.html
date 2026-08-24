@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Coordination Console</title>
+  <style>
+    body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 24px; background: #f5f7fa; color: #1f2d3d; }
+    h1 { font-size: 20px; }
+    .panel { background: #fff; border: 1px solid #dbe1e8; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .stat { background: #eef4fb; border-radius: 6px; padding: 12px; }
+    .stat b { font-size: 22px; display: block; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #dbe1e8; padding: 6px 8px; text-align: left; }
+    th { background: #f0f4f9; }
+  </style>
+</head>
+<body>
+  <h1>coordination-console</h1>
+  <div class="panel">
+    <div class="grid" id="stats"></div>
+  </div>
+  <div class="panel">
+    <h2>Election</h2>
+    <div id="election"></div>
+  </div>
+  <div class="panel">
+    <h2>Locks</h2>
+    <table id="locks"><thead><tr><th>Lock</th><th>Holder</th><th>Lease</th><th>State</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="panel">
+    <h2>Keys</h2>
+    <table id="keys"><thead><tr><th>Key</th><th>Revision</th></tr></thead><tbody></tbody></table>
+  </div>
+  <script>
+    async function refresh() {
+      const status = await fetch('/api/status').then(r => r.json());
+      document.getElementById('stats').innerHTML = [
+        ['Current Revision', status.current_rev],
+        ['Keys', status.keys],
+        ['Leases', status.leases],
+        ['Locks', status.locks],
+        ['Watches', status.watches],
+        ['Sessions', status.sessions],
+        ['Shards', status.shards],
+        ['Clock', status.clock_mode]
+      ].map(([label, value]) => `<div class="stat">${label}<b>${value}</b></div>`).join('');
+      document.getElementById('election').textContent =
+        `role=${status.election_role} term=${status.term} leader=${status.leader} node=${status.node}`;
+      const lockSnap = await fetch('/api/lock/snapshot').then(r => r.json());
+      const lockBody = document.querySelector('#locks tbody');
+      lockBody.innerHTML = (lockSnap.locks || []).map(l =>
+        `<tr><td>${l.ID}</td><td>${l.Holder}</td><td>${l.Lease}</td><td>${l.State}</td></tr>`).join('');
+      const kv = await fetch('/api/kv/snapshot').then(r => r.json());
+      const keyBody = document.querySelector('#keys tbody');
+      keyBody.innerHTML = Object.entries(kv.entries || {}).map(([key, vv]) =>
+        `<tr><td>${key}</td><td>${vv.Rev}</td></tr>`).join('');
+    }
+    setInterval(refresh, 3000);
+    refresh();
+  </script>
+</body>
+</html>
